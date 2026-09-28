@@ -9,7 +9,7 @@ A command-line background job queue written in pure Python (standard library onl
 - **Atomic claiming** — a worker moves a job to `processing` inside a transaction, so two workers never run the same job.
 - **Retries with exponential backoff** — `next_run_at = now + backoff_base ^ attempts`; configurable base and default retry limit.
 - **Dead-letter queue** — jobs that exhaust their retries move to `dead`; list them and re-queue with `dlq retry`.
-- **Priorities, scheduling and tags** — higher `priority` runs first; `run_at` delays a job until a given time.
+- **Priorities** — jobs with a higher `priority` are claimed first.
 - **Timeouts and per-job logs** — `job-timeout` config; stdout/stderr written to `~/.queuectl/logs/<job_id>.log`.
 - **Metrics** — `queuectl metrics serve` exposes job counts per state as JSON at `/metrics`.
 
@@ -29,7 +29,7 @@ Requires Python 3.8+; no third-party packages.
 ```bash
 # enqueue jobs (JSON payload)
 python -m queuectl enqueue '{"id":"job1","command":"echo hello","max_retries":3}'
-python -m queuectl enqueue '{"id":"job2","command":"./backup.sh","priority":10,"run_at":"2026-01-01T02:00:00Z"}'
+python -m queuectl enqueue '{"id":"job2","command":"./backup.sh","priority":10}'
 
 # run workers
 python -m queuectl worker start --count 3 --daemon
