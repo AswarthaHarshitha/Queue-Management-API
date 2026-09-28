@@ -1,124 +1,74 @@
-# queuectl
+# queuectl — Background Job Queue
 
-A minimal CLI-based background job queue system with retries, exponential backoff and a Dead Letter Queue (DLQ).
+A command-line background job queue written in pure Python (standard library only). Jobs are shell commands persisted in SQLite; a pool of worker processes claims them atomically, retries failures with exponential backoff, enforces timeouts and moves permanently failing jobs to a dead-letter queue. A small HTTP endpoint exposes queue metrics.
 
 ## Features
 
-- Enqueue jobs with a shell command payload
-- Start workers (foreground or background daemon) to execute jobs in parallel
-- Retry failed jobs with exponential backoff
-- Move permanently failed jobs to Dead Letter Queue
-- Persistent storage using SQLite
-- Simple CLI for management and configuration
+- **Persistent queue** — SQLite (`~/.queuectl/queue.db`) with `jobs` and `config` tables; survives restarts.
+- **Parallel workers** — foreground workers or a background daemon (PID file) that spawns N worker processes via `multiprocessing`.
+- **Atomic claiming** — a worker moves a job to `processing` inside a transaction, so two workers never run the same job.
+- **Retries with exponential backoff** — `next_run_at = now + backoff_base ^ attempts`; configurable base and default retry limit.
+- **Dead-letter queue** — jobs that exhaust their retries move to `dead`; list them and re-queue with `dlq retry`.
+- **Priorities, scheduling and tags** — higher `priority` runs first; `run_at` delays a job until a given time.
+- **Timeouts and per-job logs** — `job-timeout` config; stdout/stderr written to `~/.queuectl/logs/<job_id>.log`.
+- **Metrics** — `queuectl metrics serve` exposes job counts per state as JSON at `/metrics`.
 
-This is a lightweight implementation intended for the assignment. See usage and examples below.
+## Job Lifecycle
 
-## Unique/extra features added
-
-- Job timeouts: workers enforce a per-job timeout (config key `job-timeout`) and fail jobs that exceed it.
-- Job priority: jobs accept a numeric `priority` (higher is processed first).
-- Per-job tags and scheduling: jobs may include `tags` and an optional `run_at` timestamp to schedule future runs.
-- Per-job logs: worker writes stdout/stderr (and timeout messages) to `~/.queuectl/logs/<job_id>.log`.
-- Metrics endpoint: a tiny HTTP server exposes job counts at `/metrics` (JSON) via `queuectl metrics serve --port`.
-
-## Setup
-
-Requirements: Python 3.8+
-
-Install (optional) into a virtualenv and install dependences (none external required):
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+```
+pending ──claim──► processing ──exit 0──► completed
+   ▲                   │
+   └── backoff wait ◄──┤ non-zero exit / timeout
+                       └── retries exhausted ──► dead (DLQ) ──dlq retry──► pending
 ```
 
-Make the script executable (optional):
+## Usage
+
+Requires Python 3.8+; no third-party packages.
 
 ```bash
-chmod +x bin/queuectl
+# enqueue jobs (JSON payload)
+python -m queuectl enqueue '{"id":"job1","command":"echo hello","max_retries":3}'
+python -m queuectl enqueue '{"id":"job2","command":"./backup.sh","priority":10,"run_at":"2026-01-01T02:00:00Z"}'
+
+# run workers
+python -m queuectl worker start --count 3 --daemon
+python -m queuectl worker stop
+
+# inspect
+python -m queuectl status
+python -m queuectl list --state pending
+python -m queuectl dlq list
+python -m queuectl dlq retry job1
+
+# configure
+python -m queuectl config set backoff-base 2
+python -m queuectl config set default-max-retries 3
+python -m queuectl config set job-timeout 30
+
+# metrics
+python -m queuectl metrics serve --port 8000     # GET /metrics
 ```
 
-By default the DB is created at `~/.queuectl/queue.db` and runtime files live in `~/.queuectl`.
+## Project Structure
 
-## Usage examples
-
-Enqueue a job with JSON inline:
-
-```bash
-./bin/queuectl enqueue '{"id":"job1","command":"echo hello","max_retries":3}'
 ```
-
-List pending jobs:
-
-```bash
-./bin/queuectl list --state pending
+queuectl/
+  cli.py       argparse CLI and daemon management
+  db.py        SQLite schema, atomic claim, state transitions, DLQ
+  worker.py    job execution, timeouts, backoff, logging
+  config.py    runtime paths and defaults
+  metrics.py   HTTP metrics endpoint
+tests/         pytest tests for persistence, priority ordering and timeouts
 ```
-
-Start 3 workers in background (daemon):
-
-```bash
-./bin/queuectl worker start --count 3 --daemon
-```
-
-Stop background workers:
-
-```bash
-./bin/queuectl worker stop
-```
-
-Show status summary:
-
-```bash
-./bin/queuectl status
-```
-
-View DLQ:
-
-```bash
-./bin/queuectl dlq list
-./bin/queuectl dlq retry job1
-```
-
-Set config values:
-
-```bash
-./bin/queuectl config set backoff-base 2
-./bin/queuectl config set default-max-retries 3
-```
-
-## Architecture Overview
-
-- Storage: SQLite at `~/.queuectl/queue.db` with `jobs` and `config` tables.
-- Worker: A master process (when started with `--daemon`) spawns worker processes. Workers atomically pick a job by transitioning its state to `processing` inside a transaction to avoid duplicates.
-- Retry/backoff: After a failed run the job `attempts` is incremented and `next_run_at` is set to now + base^attempts seconds. When `attempts` > `max_retries` the job is moved to `dead` state (DLQ).
-
-## Assumptions & Trade-offs
-
-- This is a minimal assignment implementation focused on correctness and clarity, not extreme scalability.
-- Background daemon is implemented with a PID file under `~/.queuectl/pid` and uses Python multiprocessing to spawn worker processes.
-- Job output is stored in the `output` column limited to what the process prints.
 
 ## Testing
 
-A small test script is provided to exercise basic flows, including success, retry and DLQ. See `scripts/test_flow.sh`.
+```bash
+pip install pytest
+pytest -q
+```
 
-## Files added
+## Demo
 
-- `bin/queuectl` - executable wrapper
-- `queuectl/__main__.py` - entrypoint for `python -m queuectl`
-- `queuectl/cli.py`, `queuectl/db.py`, `queuectl/worker.py`, `queuectl/config.py` - core logic
-- `scripts/test_flow.sh` - simple test harness
-
-## Demo Video
-
-🎥 **Watch the Working CLI Demo**
-
-A short recording showing job enqueueing, worker execution, retries, DLQ handling, and metrics endpoint.
-
-[▶️ Click here to watch the demo on Google Drive](https://drive.google.com/file/d/1KDWyP1jSF5j1Df9UPtUxYo9I175ybrEc/view?usp=sharing)
-
-
-## Notes
-
-This implementation was created to satisfy the assignment requirements: enqueue, multiple workers, persistence, retry/backoff, DLQ and CLI management. See code for more details.
+[CLI walkthrough video](https://drive.google.com/file/d/1KDWyP1jSF5j1Df9UPtUxYo9I175ybrEc/view?usp=sharing) — enqueueing, parallel workers, retries, DLQ handling and the metrics endpoint.
